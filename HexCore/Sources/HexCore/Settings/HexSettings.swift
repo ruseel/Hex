@@ -45,6 +45,20 @@ public struct HexSettings: Codable, Equatable, Sendable {
 	public var wordRemovalsEnabled: Bool
 	public var wordRemovals: [WordRemoval]
 	public var wordRemappings: [WordRemapping]
+	
+	// Ollama post-processing settings
+	public var ollamaPostProcessingEnabled: Bool
+	public var ollamaEndpoint: String
+	public var ollamaModel: String
+	public var ollamaPrompts: [PostProcessingPrompt]
+	public var ollamaSelectedPromptID: UUID?
+	
+	// OpenRouter post-processing settings
+	public var openRouterPostProcessingEnabled: Bool
+	public var openRouterApiKey: String
+	public var openRouterModel: String
+	public var openRouterPrompts: [PostProcessingPrompt]
+	public var openRouterSelectedPromptID: UUID?
 
 	public init(
 		soundEffectsEnabled: Bool = true,
@@ -68,7 +82,17 @@ public struct HexSettings: Codable, Equatable, Sendable {
 		hasCompletedStorageMigration: Bool = false,
 		wordRemovalsEnabled: Bool = false,
 		wordRemovals: [WordRemoval] = HexSettings.defaultWordRemovals,
-		wordRemappings: [WordRemapping] = []
+		wordRemappings: [WordRemapping] = [],
+		ollamaPostProcessingEnabled: Bool = false,
+		ollamaEndpoint: String = "http://localhost:11434",
+		ollamaModel: String = "llama3.2",
+		ollamaPrompts: [PostProcessingPrompt] = [.defaultPrompt],
+		ollamaSelectedPromptID: UUID? = nil,
+		openRouterPostProcessingEnabled: Bool = false,
+		openRouterApiKey: String = "",
+		openRouterModel: String = "google/gemini-2.0-flash-001",
+		openRouterPrompts: [PostProcessingPrompt] = [.defaultPrompt],
+		openRouterSelectedPromptID: UUID? = nil
 	) {
 		self.soundEffectsEnabled = soundEffectsEnabled
 		self.soundEffectsVolume = soundEffectsVolume
@@ -92,6 +116,16 @@ public struct HexSettings: Codable, Equatable, Sendable {
 		self.wordRemovalsEnabled = wordRemovalsEnabled
 		self.wordRemovals = wordRemovals
 		self.wordRemappings = wordRemappings
+		self.ollamaPostProcessingEnabled = ollamaPostProcessingEnabled
+		self.ollamaEndpoint = ollamaEndpoint
+		self.ollamaModel = ollamaModel
+		self.ollamaPrompts = ollamaPrompts
+		self.ollamaSelectedPromptID = ollamaSelectedPromptID ?? ollamaPrompts.first?.id
+		self.openRouterPostProcessingEnabled = openRouterPostProcessingEnabled
+		self.openRouterApiKey = openRouterApiKey
+		self.openRouterModel = openRouterModel
+		self.openRouterPrompts = openRouterPrompts
+		self.openRouterSelectedPromptID = openRouterSelectedPromptID ?? openRouterPrompts.first?.id
 	}
 
 	public init(from decoder: Decoder) throws {
@@ -107,6 +141,20 @@ public struct HexSettings: Codable, Equatable, Sendable {
 		for field in HexSettingsSchema.fields {
 			try field.encode(self, into: &container)
 		}
+	}
+}
+
+// MARK: - Computed Properties
+
+extension HexSettings {
+	public var ollamaActivePrompt: String? {
+		guard let id = ollamaSelectedPromptID else { return ollamaPrompts.first?.prompt }
+		return ollamaPrompts.first { $0.id == id }?.prompt ?? ollamaPrompts.first?.prompt
+	}
+	
+	public var openRouterActivePrompt: String? {
+		guard let id = openRouterSelectedPromptID else { return openRouterPrompts.first?.prompt }
+		return openRouterPrompts.first { $0.id == id }?.prompt ?? openRouterPrompts.first?.prompt
 	}
 }
 
@@ -136,6 +184,16 @@ private enum HexSettingKey: String, CodingKey, CaseIterable {
 	case wordRemovalsEnabled
 	case wordRemovals
 	case wordRemappings
+	case ollamaPostProcessingEnabled
+	case ollamaEndpoint
+	case ollamaModel
+	case ollamaPrompts
+	case ollamaSelectedPromptID
+	case openRouterPostProcessingEnabled
+	case openRouterApiKey
+	case openRouterModel
+	case openRouterPrompts
+	case openRouterSelectedPromptID
 }
 
 private struct SettingsField<Value: Codable & Sendable> {
@@ -266,6 +324,30 @@ private enum HexSettingsSchema {
 			.wordRemappings,
 			keyPath: \.wordRemappings,
 			default: defaults.wordRemappings
+		).eraseToAny(),
+		SettingsField(.ollamaPostProcessingEnabled, keyPath: \.ollamaPostProcessingEnabled, default: defaults.ollamaPostProcessingEnabled).eraseToAny(),
+		SettingsField(.ollamaEndpoint, keyPath: \.ollamaEndpoint, default: defaults.ollamaEndpoint).eraseToAny(),
+		SettingsField(.ollamaModel, keyPath: \.ollamaModel, default: defaults.ollamaModel).eraseToAny(),
+		SettingsField(.ollamaPrompts, keyPath: \.ollamaPrompts, default: defaults.ollamaPrompts).eraseToAny(),
+		SettingsField(
+			.ollamaSelectedPromptID,
+			keyPath: \.ollamaSelectedPromptID,
+			default: defaults.ollamaSelectedPromptID,
+			encode: { container, key, value in
+				try container.encodeIfPresent(value, forKey: key)
+			}
+		).eraseToAny(),
+		SettingsField(.openRouterPostProcessingEnabled, keyPath: \.openRouterPostProcessingEnabled, default: defaults.openRouterPostProcessingEnabled).eraseToAny(),
+		SettingsField(.openRouterApiKey, keyPath: \.openRouterApiKey, default: defaults.openRouterApiKey).eraseToAny(),
+		SettingsField(.openRouterModel, keyPath: \.openRouterModel, default: defaults.openRouterModel).eraseToAny(),
+		SettingsField(.openRouterPrompts, keyPath: \.openRouterPrompts, default: defaults.openRouterPrompts).eraseToAny(),
+		SettingsField(
+			.openRouterSelectedPromptID,
+			keyPath: \.openRouterSelectedPromptID,
+			default: defaults.openRouterSelectedPromptID,
+			encode: { container, key, value in
+				try container.encodeIfPresent(value, forKey: key)
+			}
 		).eraseToAny()
 	]
 }

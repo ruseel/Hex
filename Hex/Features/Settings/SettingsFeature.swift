@@ -91,6 +91,14 @@ struct SettingsFeature {
     case addWordRemapping
     case removeWordRemapping(UUID)
     case setRemappingScratchpadFocused(Bool)
+
+    // Post-processing prompt management
+    case addOllamaPrompt
+    case selectOllamaPrompt(UUID)
+    case deleteOllamaPrompt(UUID)
+    case addOpenRouterPrompt
+    case selectOpenRouterPrompt(UUID)
+    case deleteOpenRouterPrompt(UUID)
   }
 
   @Dependency(\.keyEventMonitor) var keyEventMonitor
@@ -367,6 +375,56 @@ struct SettingsFeature {
         guard state.hexSettings.hotkey.key == nil else { return .none }
         state.$hexSettings.withLock {
           $0.hotkey.modifiers = $0.hotkey.modifiers.setting(kind: kind, to: side)
+        }
+        return .none
+
+      // MARK: - Ollama Prompt Management
+
+      case .addOllamaPrompt:
+        let newPrompt = PostProcessingPrompt(name: "New Prompt", prompt: "{{text}}")
+        state.$hexSettings.withLock {
+          $0.ollamaPrompts.append(newPrompt)
+          $0.ollamaSelectedPromptID = newPrompt.id
+        }
+        return .none
+
+      case let .selectOllamaPrompt(id):
+        state.$hexSettings.withLock {
+          $0.ollamaSelectedPromptID = id
+        }
+        return .none
+
+      case let .deleteOllamaPrompt(id):
+        state.$hexSettings.withLock {
+          $0.ollamaPrompts.removeAll { $0.id == id }
+          if $0.ollamaSelectedPromptID == id {
+            $0.ollamaSelectedPromptID = $0.ollamaPrompts.first?.id
+          }
+        }
+        return .none
+
+      // MARK: - OpenRouter Prompt Management
+
+      case .addOpenRouterPrompt:
+        let newPrompt = PostProcessingPrompt(name: "New Prompt", prompt: "{{text}}")
+        state.$hexSettings.withLock {
+          $0.openRouterPrompts.append(newPrompt)
+          $0.openRouterSelectedPromptID = newPrompt.id
+        }
+        return .none
+
+      case let .selectOpenRouterPrompt(id):
+        state.$hexSettings.withLock {
+          $0.openRouterSelectedPromptID = id
+        }
+        return .none
+
+      case let .deleteOpenRouterPrompt(id):
+        state.$hexSettings.withLock {
+          $0.openRouterPrompts.removeAll { $0.id == id }
+          if $0.openRouterSelectedPromptID == id {
+            $0.openRouterSelectedPromptID = $0.openRouterPrompts.first?.id
+          }
         }
         return .none
 

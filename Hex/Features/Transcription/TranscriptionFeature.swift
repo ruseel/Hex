@@ -55,6 +55,14 @@ struct TranscriptionFeature {
 
     // Model availability
     case modelMissing
+    
+    // Delegate actions for parent feature
+    case delegate(Delegate)
+    
+    @CasePathable
+    enum Delegate {
+      case transcriptionCompleted(TranscriptionContext)
+    }
   }
 
   enum CancelID {
@@ -139,6 +147,10 @@ struct TranscriptionFeature {
           return .none
         }
         return handleDiscard(&state)
+        
+      case .delegate:
+        // Delegate actions are handled by parent (AppFeature)
+        return .none
       }
     }
   }
@@ -409,55 +421,18 @@ private extension TranscriptionFeature {
     }
 
     let duration = state.recordingStartTime.map { Date().timeIntervalSince($0) } ?? 0
-
     transcriptionFeatureLogger.info("Raw transcription: '\(result)'")
-    let remappings = state.hexSettings.wordRemappings
-    let removalsEnabled = state.hexSettings.wordRemovalsEnabled
-    let removals = state.hexSettings.wordRemovals
-    let modifiedResult: String
-    if state.isRemappingScratchpadFocused {
-      modifiedResult = result
-      transcriptionFeatureLogger.info("Scratchpad focused; skipping word modifications")
-    } else {
-      var output = result
-      if removalsEnabled {
-        let removedResult = WordRemovalApplier.apply(output, removals: removals)
-        if removedResult != output {
-          let enabledRemovalCount = removals.filter(\.isEnabled).count
-          transcriptionFeatureLogger.info("Applied \(enabledRemovalCount) word removal(s)")
-        }
-        output = removedResult
-      }
-      let remappedResult = WordRemappingApplier.apply(output, remappings: remappings)
-      if remappedResult != output {
-        transcriptionFeatureLogger.info("Applied \(remappings.count) word remapping(s)")
-      }
-      modifiedResult = remappedResult
-    }
 
-    guard !modifiedResult.isEmpty else {
-      return .none
-    }
-
-    let sourceAppBundleID = state.sourceAppBundleID
-    let sourceAppName = state.sourceAppName
-    let transcriptionHistory = state.$transcriptionHistory
-
-    return .run { send in
-      do {
-        try await finalizeRecordingAndStoreTranscript(
-          result: modifiedResult,
-          duration: duration,
-          sourceAppBundleID: sourceAppBundleID,
-          sourceAppName: sourceAppName,
-          audioURL: audioURL,
-          transcriptionHistory: transcriptionHistory
-        )
-      } catch {
-        await send(.transcriptionError(error, audioURL))
-      }
-    }
-    .cancellable(id: CancelID.transcription)
+    // Create context and delegate to PostProcessingFeature
+    let context = TranscriptionContext(
+      rawText: result,
+      audioURL: audioURL,
+      duration: duration,
+      sourceAppBundleID: state.sourceAppBundleID,
+      sourceAppName: state.sourceAppName
+    )
+    
+    return .send(.delegate(.transcriptionCompleted(context)))
   }
 
   func handleTranscriptionError(
@@ -474,47 +449,6 @@ private extension TranscriptionFeature {
     }
 
     return .none
-  }
-
-  /// Move file to permanent location, create a transcript record, paste text, and play sound.
-  func finalizeRecordingAndStoreTranscript(
-    result: String,
-    duration: TimeInterval,
-    sourceAppBundleID: String?,
-    sourceAppName: String?,
-    audioURL: URL,
-    transcriptionHistory: Shared<TranscriptionHistory>
-  ) async throws {
-    @Shared(.hexSettings) var hexSettings: HexSettings
-
-    if hexSettings.saveTranscriptionHistory {
-      let transcript = try await transcriptPersistence.save(
-        result,
-        audioURL,
-        duration,
-        sourceAppBundleID,
-        sourceAppName
-      )
-
-      transcriptionHistory.withLock { history in
-        history.history.insert(transcript, at: 0)
-
-        if let maxEntries = hexSettings.maxHistoryEntries, maxEntries > 0 {
-          while history.history.count > maxEntries {
-            if let removedTranscript = history.history.popLast() {
-              Task {
-                 try? await transcriptPersistence.deleteAudio(removedTranscript)
-              }
-            }
-          }
-        }
-      }
-    } else {
-      try? FileManager.default.removeItem(at: audioURL)
-    }
-
-    await pasteboard.paste(result)
-    soundEffect.play(.pasteTranscript)
   }
 }
 

@@ -94,10 +94,11 @@ class HexAppDelegate: NSObject, NSApplicationDelegate {
 		let settingsView = AppView(store: HexApp.appStore)
 		let settingsWindow = NSWindow(
 			contentRect: .init(x: 0, y: 0, width: 700, height: 700),
-			styleMask: [.titled, .fullSizeContentView, .closable, .miniaturizable],
+			styleMask: [.titled, .fullSizeContentView, .closable, .miniaturizable, .resizable],
 			backing: .buffered,
 			defer: false
 		)
+		settingsWindow.minSize = NSSize(width: 700, height: 700)
 		settingsWindow.titleVisibility = .visible
 		settingsWindow.contentView = NSHostingView(rootView: settingsView)
 		settingsWindow.isReleasedWhenClosed = false

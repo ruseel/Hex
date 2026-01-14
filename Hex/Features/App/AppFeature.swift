@@ -23,6 +23,7 @@ struct AppFeature {
 	@ObservableState
 	struct State {
 		var transcription: TranscriptionFeature.State = .init()
+		var postProcessing: PostProcessingFeature.State = .init()
 		var settings: SettingsFeature.State = .init()
 		var history: HistoryFeature.State = .init()
 		var activeTab: ActiveTab = .settings
@@ -38,6 +39,7 @@ struct AppFeature {
   enum Action: BindableAction {
     case binding(BindingAction<State>)
     case transcription(TranscriptionFeature.Action)
+    case postProcessing(PostProcessingFeature.Action)
     case settings(SettingsFeature.Action)
     case history(HistoryFeature.Action)
     case setActiveTab(ActiveTab)
@@ -64,6 +66,10 @@ struct AppFeature {
 
     Scope(state: \.transcription, action: \.transcription) {
       TranscriptionFeature()
+    }
+
+    Scope(state: \.postProcessing, action: \.postProcessing) {
+      PostProcessingFeature()
     }
 
     Scope(state: \.settings, action: \.settings) {
@@ -108,7 +114,14 @@ struct AppFeature {
           await send(.settings(.set(\.shouldFlashModelSection, false)))
         }
 
+      // Route transcription delegate to post-processing
+      case let .transcription(.delegate(.transcriptionCompleted(context))):
+        return .send(.postProcessing(.processTranscription(context)))
+
       case .transcription:
+        return .none
+
+      case .postProcessing:
         return .none
 
       case .settings:
