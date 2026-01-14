@@ -159,22 +159,25 @@ private extension TranscriptionFeature {
 
   /// Effect to start monitoring hotkey events through the `keyEventMonitor`.
   func startHotKeyMonitoringEffect() -> Effect<Action> {
-    .run { send in
-      var hotKeyProcessor: HotKeyProcessor = .init(hotkey: HotKey(key: nil, modifiers: [.option]))
-      @Shared(.isSettingHotKey) var isSettingHotKey: Bool
-      @Shared(.hexSettings) var hexSettings: HexSettings
+    let isSettingHotKey = Shared(.isSettingHotKey)
+    let hexSettings = Shared(.hexSettings)
+
+    return .run { send in
+      // nonisolated(unsafe) since event callbacks run on a single thread
+      nonisolated(unsafe) var hotKeyProcessor: HotKeyProcessor = .init(hotkey: HotKey(key: nil, modifiers: [.option]))
 
       // Handle incoming input events (keyboard and mouse)
       let token = keyEventMonitor.handleInputEvent { inputEvent in
         // Skip if the user is currently setting a hotkey
-        if isSettingHotKey {
+        if isSettingHotKey.wrappedValue {
           return false
         }
 
         // Always keep hotKeyProcessor in sync with current user hotkey preference
-        hotKeyProcessor.hotkey = hexSettings.hotkey
-        hotKeyProcessor.useDoubleTapOnly = hexSettings.useDoubleTapOnly
-        hotKeyProcessor.minimumKeyTime = hexSettings.minimumKeyTime
+        let settings = hexSettings.wrappedValue
+        hotKeyProcessor.hotkey = settings.hotkey
+        hotKeyProcessor.useDoubleTapOnly = settings.useDoubleTapOnly
+        hotKeyProcessor.minimumKeyTime = settings.minimumKeyTime
 
         switch inputEvent {
         case .keyboard(let keyEvent):
@@ -197,7 +200,7 @@ private extension TranscriptionFeature {
             }
             // If the hotkey is purely modifiers, return false to keep it from interfering with normal usage
             // But if useDoubleTapOnly is true, always intercept the key
-            return hexSettings.useDoubleTapOnly || keyEvent.key != nil
+            return settings.useDoubleTapOnly || keyEvent.key != nil
 
           case .stopRecording:
             Task { await send(.hotKeyReleased) }

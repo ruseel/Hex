@@ -174,18 +174,18 @@ struct AppFeature {
   }
   
   private func startPasteLastTranscriptMonitoring() -> Effect<Action> {
-    .run { send in
-      @Shared(.isSettingPasteLastTranscriptHotkey) var isSettingPasteLastTranscriptHotkey: Bool
-      @Shared(.hexSettings) var hexSettings: HexSettings
+    let isSettingHotkey = Shared(.isSettingPasteLastTranscriptHotkey)
+    let hexSettings = Shared(.hexSettings)
 
+    return .run { send in
       let token = keyEventMonitor.handleKeyEvent { keyEvent in
         // Skip if user is setting a hotkey
-        if isSettingPasteLastTranscriptHotkey {
+        if isSettingHotkey.wrappedValue {
           return false
         }
 
         // Check if this matches the paste last transcript hotkey
-        guard let pasteHotkey = hexSettings.pasteLastTranscriptHotkey,
+        guard let pasteHotkey = hexSettings.wrappedValue.pasteLastTranscriptHotkey,
               let key = keyEvent.key,
               key == pasteHotkey.key,
               keyEvent.modifiers.matchesExactly(pasteHotkey.modifiers) else {
