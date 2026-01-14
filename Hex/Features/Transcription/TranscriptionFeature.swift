@@ -127,7 +127,7 @@ struct TranscriptionFeature {
       // MARK: - Cancel/Discard Flow
 
       case .cancel:
-        // Only cancel if we're in the middle of recording, transcribing, or post-processing
+        // Only cancel if we're in the middle of recording or transcribing
         guard state.isRecording || state.isTranscribing else {
           return .none
         }
