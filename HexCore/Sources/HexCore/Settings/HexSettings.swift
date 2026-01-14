@@ -59,6 +59,11 @@ public struct HexSettings: Codable, Equatable, Sendable {
 	public var openRouterModel: String
 	public var openRouterPrompts: [PostProcessingPrompt]
 	public var openRouterSelectedPromptID: UUID?
+	
+	// OTLP Tracing settings
+	public var tracingEnabled: Bool
+	public var otlpEndpoint: String
+	public var otlpUseTLS: Bool
 
 	public init(
 		soundEffectsEnabled: Bool = true,
@@ -85,14 +90,17 @@ public struct HexSettings: Codable, Equatable, Sendable {
 		wordRemappings: [WordRemapping] = [],
 		ollamaPostProcessingEnabled: Bool = false,
 		ollamaEndpoint: String = "http://localhost:11434",
-		ollamaModel: String = "llama3.2",
+		ollamaModel: String = "gpt-oss:20b",
 		ollamaPrompts: [PostProcessingPrompt] = [.defaultPrompt],
 		ollamaSelectedPromptID: UUID? = nil,
 		openRouterPostProcessingEnabled: Bool = false,
 		openRouterApiKey: String = "",
-		openRouterModel: String = "google/gemini-2.0-flash-001",
+		openRouterModel: String = "google/gemini-3-flash-preview",
 		openRouterPrompts: [PostProcessingPrompt] = [.defaultPrompt],
-		openRouterSelectedPromptID: UUID? = nil
+		openRouterSelectedPromptID: UUID? = nil,
+		tracingEnabled: Bool = false,
+		otlpEndpoint: String = "localhost:4317",
+		otlpUseTLS: Bool = false
 	) {
 		self.soundEffectsEnabled = soundEffectsEnabled
 		self.soundEffectsVolume = soundEffectsVolume
@@ -126,6 +134,9 @@ public struct HexSettings: Codable, Equatable, Sendable {
 		self.openRouterModel = openRouterModel
 		self.openRouterPrompts = openRouterPrompts
 		self.openRouterSelectedPromptID = openRouterSelectedPromptID ?? openRouterPrompts.first?.id
+		self.tracingEnabled = tracingEnabled
+		self.otlpEndpoint = otlpEndpoint
+		self.otlpUseTLS = otlpUseTLS
 	}
 
 	public init(from decoder: Decoder) throws {
@@ -194,6 +205,9 @@ private enum HexSettingKey: String, CodingKey, CaseIterable {
 	case openRouterModel
 	case openRouterPrompts
 	case openRouterSelectedPromptID
+	case tracingEnabled
+	case otlpEndpoint
+	case otlpUseTLS
 }
 
 private struct SettingsField<Value: Codable & Sendable> {
@@ -348,6 +362,9 @@ private enum HexSettingsSchema {
 			encode: { container, key, value in
 				try container.encodeIfPresent(value, forKey: key)
 			}
-		).eraseToAny()
+		).eraseToAny(),
+		SettingsField(.tracingEnabled, keyPath: \.tracingEnabled, default: defaults.tracingEnabled).eraseToAny(),
+		SettingsField(.otlpEndpoint, keyPath: \.otlpEndpoint, default: defaults.otlpEndpoint).eraseToAny(),
+		SettingsField(.otlpUseTLS, keyPath: \.otlpUseTLS, default: defaults.otlpUseTLS).eraseToAny()
 	]
 }

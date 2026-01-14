@@ -9,12 +9,18 @@ struct PostProcessingSectionView: View {
 
 	var body: some View {
 		Section {
-			OllamaPostProcessingView(store: store)
-			OpenRouterPostProcessingView(store: store)
+			LLMProviderView(
+				store: store,
+				provider: .ollama
+			)
+			LLMProviderView(
+				store: store,
+				provider: .openRouter
+			)
 		} header: {
 			Text("LLM Post-Processing")
 		} footer: {
-			Text("Use a local or cloud LLM to clean up transcriptions. OpenRouter takes precedence if both are enabled.")
+			Text("Use a local or cloud LLM to clean up transcriptions. Only one provider can be enabled at a time.")
 				.font(.footnote)
 				.foregroundColor(.secondary)
 		}
@@ -22,111 +28,182 @@ struct PostProcessingSectionView: View {
 	}
 }
 
-// MARK: - Ollama Post-Processing
+// MARK: - LLM Provider Configuration
 
-private struct OllamaPostProcessingView: View {
-	@ObserveInjection var inject
-	@Bindable var store: StoreOf<SettingsFeature>
-	@State private var isExpanded = false
+private enum LLMProvider {
+	case ollama
+	case openRouter
 
-	var body: some View {
-		DisclosureGroup(isExpanded: $isExpanded) {
-			VStack(alignment: .leading, spacing: 12) {
-				VStack(alignment: .leading, spacing: 4) {
-					Text("Endpoint")
-						.font(.subheadline)
-					TextField("http://localhost:11434", text: $store.hexSettings.ollamaEndpoint)
-						.textFieldStyle(.roundedBorder)
-				}
-
-				VStack(alignment: .leading, spacing: 4) {
-					Text("Model")
-						.font(.subheadline)
-					TextField("llama3.2", text: $store.hexSettings.ollamaModel)
-						.textFieldStyle(.roundedBorder)
-				}
-
-				Divider()
-
-				PromptListView(
-					prompts: store.hexSettings.ollamaPrompts,
-					selectedPromptID: store.hexSettings.ollamaSelectedPromptID,
-					promptBinding: { id in ollamaPromptBinding(for: id) },
-					onAdd: { store.send(.addOllamaPrompt) },
-					onSelect: { store.send(.selectOllamaPrompt($0)) },
-					onDelete: { store.send(.deleteOllamaPrompt($0)) }
-				)
-			}
-			.padding(.vertical, 4)
-		} label: {
-			Label {
-				Toggle("Ollama (Local)", isOn: $store.hexSettings.ollamaPostProcessingEnabled)
-			} icon: {
-				Image(systemName: "desktopcomputer")
-			}
+	var title: String {
+		switch self {
+		case .ollama: "Ollama (Local)"
+		case .openRouter: "OpenRouter (Cloud)"
 		}
-		.enableInjection()
 	}
 
-	private func ollamaPromptBinding(for id: UUID) -> Binding<PostProcessingPrompt>? {
-		guard let index = store.hexSettings.ollamaPrompts.firstIndex(where: { $0.id == id }) else {
-			return nil
+	var icon: String {
+		switch self {
+		case .ollama: "desktopcomputer"
+		case .openRouter: "cloud"
 		}
-		return $store.hexSettings.ollamaPrompts[index]
+	}
+
+	var connectionFields: [(label: String, placeholder: String, isSecure: Bool)] {
+		switch self {
+		case .ollama:
+			[
+				(label: "Endpoint", placeholder: "http://localhost:11434", isSecure: false),
+				(label: "Model", placeholder: "llama3.2", isSecure: false)
+			]
+		case .openRouter:
+			[
+				(label: "API Key", placeholder: "sk-or-...", isSecure: true),
+				(label: "Model", placeholder: "google/gemini-2.0-flash-001", isSecure: false)
+			]
+		}
 	}
 }
 
-// MARK: - OpenRouter Post-Processing
-
-private struct OpenRouterPostProcessingView: View {
+private struct LLMProviderView: View {
 	@ObserveInjection var inject
 	@Bindable var store: StoreOf<SettingsFeature>
+	let provider: LLMProvider
 	@State private var isExpanded = false
+
+	private var isEnabled: Bool {
+		switch provider {
+		case .ollama: store.hexSettings.ollamaPostProcessingEnabled
+		case .openRouter: store.hexSettings.openRouterPostProcessingEnabled
+		}
+	}
+
+	private var enabledBinding: Binding<Bool> {
+		Binding(
+			get: { isEnabled },
+			set: { newValue in
+				if newValue {
+					switch provider {
+					case .ollama: store.send(.enableOllama)
+					case .openRouter: store.send(.enableOpenRouter)
+					}
+				} else {
+					store.send(.disablePostProcessing(
+						provider == .ollama ? .ollama : .openRouter
+					))
+				}
+			}
+		)
+	}
+
+	private var prompts: [PostProcessingPrompt] {
+		switch provider {
+		case .ollama: store.hexSettings.ollamaPrompts
+		case .openRouter: store.hexSettings.openRouterPrompts
+		}
+	}
+
+	private var selectedPromptID: UUID? {
+		switch provider {
+		case .ollama: store.hexSettings.ollamaSelectedPromptID
+		case .openRouter: store.hexSettings.openRouterSelectedPromptID
+		}
+	}
 
 	var body: some View {
 		DisclosureGroup(isExpanded: $isExpanded) {
 			VStack(alignment: .leading, spacing: 12) {
-				VStack(alignment: .leading, spacing: 4) {
-					Text("API Key")
-						.font(.subheadline)
-					SecureField("sk-or-...", text: $store.hexSettings.openRouterApiKey)
-						.textFieldStyle(.roundedBorder)
-				}
-
-				VStack(alignment: .leading, spacing: 4) {
-					Text("Model")
-						.font(.subheadline)
-					TextField("google/gemini-2.0-flash-001", text: $store.hexSettings.openRouterModel)
-						.textFieldStyle(.roundedBorder)
-				}
-
+				connectionFieldsView
 				Divider()
-
 				PromptListView(
-					prompts: store.hexSettings.openRouterPrompts,
-					selectedPromptID: store.hexSettings.openRouterSelectedPromptID,
-					promptBinding: { id in openRouterPromptBinding(for: id) },
-					onAdd: { store.send(.addOpenRouterPrompt) },
-					onSelect: { store.send(.selectOpenRouterPrompt($0)) },
-					onDelete: { store.send(.deleteOpenRouterPrompt($0)) }
+					prompts: prompts,
+					selectedPromptID: selectedPromptID,
+					promptBinding: promptBinding,
+					onAdd: { sendPromptAction(.add) },
+					onSelect: { sendPromptAction(.select($0)) },
+					onDelete: { sendPromptAction(.delete($0)) }
 				)
 			}
 			.padding(.vertical, 4)
 		} label: {
 			Label {
-				Toggle("OpenRouter (Cloud)", isOn: $store.hexSettings.openRouterPostProcessingEnabled)
+				Toggle(provider.title, isOn: enabledBinding)
 			} icon: {
-				Image(systemName: "cloud")
+				Image(systemName: provider.icon)
 			}
 		}
 		.enableInjection()
 	}
 
-	private func openRouterPromptBinding(for id: UUID) -> Binding<PostProcessingPrompt>? {
-		guard let index = store.hexSettings.openRouterPrompts.firstIndex(where: { $0.id == id }) else {
-			return nil
+	@ViewBuilder
+	private var connectionFieldsView: some View {
+		switch provider {
+		case .ollama:
+			ConfigTextField(label: "Endpoint", placeholder: "http://localhost:11434", text: $store.hexSettings.ollamaEndpoint)
+			ConfigTextField(label: "Model", placeholder: "llama3.2", text: $store.hexSettings.ollamaModel)
+		case .openRouter:
+			ConfigSecureField(label: "API Key", placeholder: "sk-or-...", text: $store.hexSettings.openRouterApiKey)
+			ConfigTextField(label: "Model", placeholder: "google/gemini-2.0-flash-001", text: $store.hexSettings.openRouterModel)
 		}
-		return $store.hexSettings.openRouterPrompts[index]
+	}
+
+	private func promptBinding(for id: UUID) -> Binding<PostProcessingPrompt>? {
+		switch provider {
+		case .ollama:
+			guard let index = store.hexSettings.ollamaPrompts.firstIndex(where: { $0.id == id }) else { return nil }
+			return $store.hexSettings.ollamaPrompts[index]
+		case .openRouter:
+			guard let index = store.hexSettings.openRouterPrompts.firstIndex(where: { $0.id == id }) else { return nil }
+			return $store.hexSettings.openRouterPrompts[index]
+		}
+	}
+
+	private enum PromptAction {
+		case add
+		case select(UUID)
+		case delete(UUID)
+	}
+
+	private func sendPromptAction(_ action: PromptAction) {
+		switch (provider, action) {
+		case (.ollama, .add): store.send(.addOllamaPrompt)
+		case (.ollama, .select(let id)): store.send(.selectOllamaPrompt(id))
+		case (.ollama, .delete(let id)): store.send(.deleteOllamaPrompt(id))
+		case (.openRouter, .add): store.send(.addOpenRouterPrompt)
+		case (.openRouter, .select(let id)): store.send(.selectOpenRouterPrompt(id))
+		case (.openRouter, .delete(let id)): store.send(.deleteOpenRouterPrompt(id))
+		}
+	}
+}
+
+// MARK: - Config Field Components
+
+private struct ConfigTextField: View {
+	let label: String
+	let placeholder: String
+	@Binding var text: String
+
+	var body: some View {
+		VStack(alignment: .leading, spacing: 4) {
+			Text(label)
+				.font(.subheadline)
+			TextField(placeholder, text: $text)
+				.textFieldStyle(.roundedBorder)
+		}
+	}
+}
+
+private struct ConfigSecureField: View {
+	let label: String
+	let placeholder: String
+	@Binding var text: String
+
+	var body: some View {
+		VStack(alignment: .leading, spacing: 4) {
+			Text(label)
+				.font(.subheadline)
+			SecureField(placeholder, text: $text)
+				.textFieldStyle(.roundedBorder)
+		}
 	}
 }
 

@@ -17,6 +17,7 @@ struct AppFeature {
     case settings
     case remappings
     case history
+    case tracing
     case about
   }
 
@@ -300,6 +301,14 @@ struct AppView: View {
         .tag(AppFeature.ActiveTab.history)
 
         Button {
+          store.send(.setActiveTab(.tracing))
+        } label: {
+          Label("Tracing", systemImage: "point.3.connected.trianglepath.dotted")
+        }
+        .buttonStyle(.plain)
+        .tag(AppFeature.ActiveTab.tracing)
+
+        Button {
           store.send(.setActiveTab(.about))
         } label: {
           Label("About", systemImage: "info.circle")
@@ -323,6 +332,9 @@ struct AppView: View {
       case .history:
         HistoryView(store: store.scope(state: \.history, action: \.history))
           .navigationTitle("History")
+      case .tracing:
+        TracingSettingsView(store: store.scope(state: \.settings, action: \.settings))
+          .navigationTitle("Tracing")
       case .about:
         AboutView(store: store.scope(state: \.settings, action: \.settings))
           .navigationTitle("About")

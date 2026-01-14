@@ -18,7 +18,7 @@ private let transcriptionFeatureLogger = HexLog.transcription
 @Reducer
 struct TranscriptionFeature {
   @ObservableState
-  struct State {
+  struct State: TraceContextState {
     var isRecording: Bool = false
     var isTranscribing: Bool = false
     var isPrewarming: Bool = false
@@ -27,6 +27,10 @@ struct TranscriptionFeature {
     var meter: Meter = .init(averagePower: 0, peakPower: 0)
     var sourceAppBundleID: String?
     var sourceAppName: String?
+    
+    /// Active trace context for the current transcription pipeline
+    var traceContext: TraceContext?
+    
     @Shared(.hexSettings) var hexSettings: HexSettings
     @Shared(.isRemappingScratchpadFocused) var isRemappingScratchpadFocused: Bool = false
     @Shared(.modelBootstrapState) var modelBootstrapState: ModelBootstrapState
@@ -50,11 +54,14 @@ struct TranscriptionFeature {
     case discard  // Silent discard (too short/accidental)
 
     // Transcription result flow
-    case transcriptionResult(String, URL)
-    case transcriptionError(Error, URL?)
+    case transcriptionResult(String, URL, TraceContext?)
+    case transcriptionError(Error, URL?, TraceContext?)
 
     // Model availability
     case modelMissing
+    
+    // Tracing actions
+    case traceContextCreated(TraceContext)
     
     // Delegate actions for parent feature
     case delegate(Delegate)
@@ -123,13 +130,17 @@ struct TranscriptionFeature {
 
       // MARK: - Transcription Results
 
-      case let .transcriptionResult(result, audioURL):
-        return handleTranscriptionResult(&state, result: result, audioURL: audioURL)
+      case let .transcriptionResult(result, audioURL, traceContext):
+        return handleTranscriptionResult(&state, result: result, audioURL: audioURL, traceContext: traceContext)
 
-      case let .transcriptionError(error, audioURL):
-        return handleTranscriptionError(&state, error: error, audioURL: audioURL)
+      case let .transcriptionError(error, audioURL, traceContext):
+        return handleTranscriptionError(&state, error: error, audioURL: audioURL, traceContext: traceContext)
 
       case .modelMissing:
+        return .none
+        
+      case let .traceContextCreated(context):
+        state.traceContext = context
         return .none
 
       // MARK: - Cancel/Discard Flow
@@ -308,8 +319,31 @@ private extension TranscriptionFeature {
     }
     transcriptionFeatureLogger.notice("Recording started at \(startTime.ISO8601Format())")
 
-    // Prevent system sleep during recording
-    return .run { [sleepManagement, preventSleep = state.hexSettings.preventSystemSleep] send in
+    let sourceAppName = state.sourceAppName
+    let selectedModel = state.hexSettings.selectedModel
+    let preventSleep = state.hexSettings.preventSystemSleep
+
+    return .run { send in
+      @Dependency(\.sleepManagement) var sleepManagement
+      @Dependency(\.recording) var recording
+      @Dependency(\.soundEffects) var soundEffect
+      @Dependency(\.tracing) var tracing
+      
+      // Start pipeline span (will be ended by stopRecording/cancel/discard)
+      let pipelineContext = await PipelineSpanManager.startPipelineSpan(
+        name: "transcription-pipeline",
+        attributes: [
+          "hex.source_app": sourceAppName ?? "unknown",
+          "hex.model": selectedModel,
+        ]
+      )
+      
+      // Send trace context back to state
+      await send(.traceContextCreated(pipelineContext))
+      
+      // Create and complete a short recording-setup span
+      let recordingSpan = await tracing.startSpan("recording", pipelineContext)
+      
       // Play sound immediately for instant feedback
       soundEffect.play(.startRecording)
 
@@ -317,6 +351,9 @@ private extension TranscriptionFeature {
         await sleepManagement.preventSleep(reason: "Hex Voice Recording")
       }
       await recording.startRecording()
+      
+      await tracing.endSpan(recordingSpan, .ok)
+      // Pipeline span stays open for stopRecording/cancel/discard to end
     }
   }
 
@@ -348,7 +385,20 @@ private extension TranscriptionFeature {
       // If the user recorded for less than minimumKeyTime and the hotkey is modifier-only,
       // discard the audio to avoid accidental triggers.
       transcriptionFeatureLogger.notice("Discarding short recording per decision \(String(describing: decision))")
+      let pipelineContext = state.traceContext
+      state.traceContext = nil
+      let decisionString = String(describing: decision)
       return .run { _ in
+        @Dependency(\.recording) var recording
+        
+        // End pipeline span for discarded recording
+        if let ctx = pipelineContext {
+          await PipelineSpanManager.endPipelineSpan(
+            context: ctx,
+            status: .ok,
+            terminalSpanName: "discarded"
+          )
+        }
         let url = await recording.stopRecording()
         try? FileManager.default.removeItem(at: url)
       }
@@ -359,34 +409,53 @@ private extension TranscriptionFeature {
     state.error = nil
     let model = state.hexSettings.selectedModel
     let language = state.hexSettings.outputLanguage
+    let pipelineTraceContext = state.traceContext
 
     state.isPrewarming = true
 
-    return .run { [sleepManagement] send in
+    return .tracedRun(
+      spanName: "transcription",
+      parentContext: pipelineTraceContext
+    ) { send, span in
+      @Dependency(\.sleepManagement) var sleepManagement
+      @Dependency(\.recording) var recording
+      @Dependency(\.soundEffects) var soundEffect
+      @Dependency(\.transcription) var transcription
+      
       // Allow system to sleep again
       await sleepManagement.allowSleep()
+
+      await span.setAttribute("hex.model", model)
+      if let language = language {
+        await span.setAttribute("hex.language", language)
+      }
 
       var audioURL: URL?
       do {
         soundEffect.play(.stopRecording)
         let capturedURL = await recording.stopRecording()
         audioURL = capturedURL
+        
+        await span.setAttribute("hex.audio_file", capturedURL.lastPathComponent)
 
-        // Create transcription options with the selected language
-        // Note: cap concurrency to avoid audio I/O overloads on some Macs
         let decodeOptions = DecodingOptions(
           language: language,
-          detectLanguage: language == nil, // Only auto-detect if no language specified
-          chunkingStrategy: .vad,
+          detectLanguage: language == nil,
+          chunkingStrategy: .vad
         )
         
         let result = try await transcription.transcribe(capturedURL, model, decodeOptions) { _ in }
         
+        await span.setAttribute("hex.result_length", String(result.count))
+        await span.setAttribute("hex.result", result)
+        
         transcriptionFeatureLogger.notice("Transcribed audio from \(capturedURL.lastPathComponent) to text length \(result.count)")
-        await send(.transcriptionResult(result, capturedURL))
+        await send(.transcriptionResult(result, capturedURL, pipelineTraceContext))
       } catch {
+        await span.recordEvent("error", attributes: ["message": error.localizedDescription])
         transcriptionFeatureLogger.error("Transcription failed: \(error.localizedDescription)")
-        await send(.transcriptionError(error, audioURL))
+        await send(.transcriptionError(error, audioURL, pipelineTraceContext))
+        throw error
       }
     }
     .cancellable(id: CancelID.transcription)
@@ -399,7 +468,8 @@ private extension TranscriptionFeature {
   func handleTranscriptionResult(
     _ state: inout State,
     result: String,
-    audioURL: URL
+    audioURL: URL,
+    traceContext: TraceContext?
   ) -> Effect<Action> {
     state.isTranscribing = false
     state.isPrewarming = false
@@ -408,6 +478,14 @@ private extension TranscriptionFeature {
     if ForceQuitCommandDetector.matches(result) {
       transcriptionFeatureLogger.fault("Force quit voice command recognized; terminating Hex.")
       return .run { _ in
+        // End pipeline span before terminating
+        if let ctx = traceContext {
+          await PipelineSpanManager.endPipelineSpan(
+            context: ctx,
+            status: .ok,
+            terminalSpanName: "force-quit"
+          )
+        }
         try? FileManager.default.removeItem(at: audioURL)
         await MainActor.run {
           NSApp.terminate(nil)
@@ -429,7 +507,8 @@ private extension TranscriptionFeature {
       audioURL: audioURL,
       duration: duration,
       sourceAppBundleID: state.sourceAppBundleID,
-      sourceAppName: state.sourceAppName
+      sourceAppName: state.sourceAppName,
+      traceContext: traceContext
     )
     
     return .send(.delegate(.transcriptionCompleted(context)))
@@ -438,17 +517,30 @@ private extension TranscriptionFeature {
   func handleTranscriptionError(
     _ state: inout State,
     error: Error,
-    audioURL: URL?
+    audioURL: URL?,
+    traceContext: TraceContext?
   ) -> Effect<Action> {
     state.isTranscribing = false
     state.isPrewarming = false
     state.error = error.localizedDescription
+    state.traceContext = nil
     
     if let audioURL {
       try? FileManager.default.removeItem(at: audioURL)
     }
 
-    return .none
+    let errorMessage = error.localizedDescription
+    
+    // End the pipeline span with error
+    return .run { _ in
+      if let ctx = traceContext {
+        await PipelineSpanManager.endPipelineSpan(
+          context: ctx,
+          status: .error(errorMessage),
+          terminalSpanName: "pipeline-error"
+        )
+      }
+    }
   }
 }
 
@@ -459,10 +551,24 @@ private extension TranscriptionFeature {
     state.isTranscribing = false
     state.isRecording = false
     state.isPrewarming = false
+    let pipelineContext = state.traceContext
+    state.traceContext = nil
 
     return .merge(
       .cancel(id: CancelID.transcription),
-      .run { [sleepManagement] _ in
+      .run { _ in
+        @Dependency(\.sleepManagement) var sleepManagement
+        @Dependency(\.recording) var recording
+        @Dependency(\.soundEffects) var soundEffect
+        
+        // End pipeline span with cancellation
+        if let ctx = pipelineContext {
+          await PipelineSpanManager.endPipelineSpan(
+            context: ctx,
+            status: .ok,
+            terminalSpanName: "cancelled"
+          )
+        }
         // Allow system to sleep again
         await sleepManagement.allowSleep()
         // Stop the recording to release microphone access
@@ -476,9 +582,22 @@ private extension TranscriptionFeature {
   func handleDiscard(_ state: inout State) -> Effect<Action> {
     state.isRecording = false
     state.isPrewarming = false
+    let pipelineContext = state.traceContext
+    state.traceContext = nil
 
     // Silently discard - no sound effect
-    return .run { [sleepManagement] _ in
+    return .run { _ in
+      @Dependency(\.sleepManagement) var sleepManagement
+      @Dependency(\.recording) var recording
+      
+      // End pipeline span for discarded recording
+      if let ctx = pipelineContext {
+        await PipelineSpanManager.endPipelineSpan(
+          context: ctx,
+          status: .ok,
+          terminalSpanName: "discarded"
+        )
+      }
       // Allow system to sleep again
       await sleepManagement.allowSleep()
       let url = await recording.stopRecording()

@@ -19,18 +19,23 @@ public struct TranscriptionContext: Equatable, Sendable {
   public let sourceAppBundleID: String?
   public let sourceAppName: String?
   
+  /// Trace context for OpenTelemetry span linking
+  public let traceContext: TraceContext?
+  
   public init(
     rawText: String,
     audioURL: URL,
     duration: TimeInterval,
     sourceAppBundleID: String?,
-    sourceAppName: String?
+    sourceAppName: String?,
+    traceContext: TraceContext? = nil
   ) {
     self.rawText = rawText
     self.audioURL = audioURL
     self.duration = duration
     self.sourceAppBundleID = sourceAppBundleID
     self.sourceAppName = sourceAppName
+    self.traceContext = traceContext
   }
 }
 
@@ -64,6 +69,7 @@ struct PostProcessingFeature {
   @Dependency(\.transcriptPersistence) var transcriptPersistence
   @Dependency(\.ollamaClient) var ollamaClient
   @Dependency(\.openRouterClient) var openRouterClient
+  @Dependency(\.tracing) var tracing
 
   var body: some ReducerOf<Self> {
     Reduce { state, action in
@@ -89,7 +95,10 @@ struct PostProcessingFeature {
         let openRouterModel = state.hexSettings.openRouterModel
         let openRouterApiKey = state.hexSettings.openRouterApiKey
         
-        return .run { send in
+        return .run { [tracing] send in
+          // Start post-processing span as child of pipeline
+          let postProcessSpan = await tracing.startSpan("post-processing", context.traceContext)
+          
           do {
             var output = context.rawText
             
@@ -100,6 +109,7 @@ struct PostProcessingFeature {
                 if removedResult != output {
                   let enabledRemovalCount = removals.filter(\.isEnabled).count
                   postProcessingLogger.info("Applied \(enabledRemovalCount) word removal(s)")
+                  await tracing.recordEvent(postProcessSpan, "word-removals-applied", ["count": String(enabledRemovalCount)])
                 }
                 output = removedResult
               }
@@ -107,6 +117,7 @@ struct PostProcessingFeature {
               let remappedResult = WordRemappingApplier.apply(output, remappings: remappings)
               if remappedResult != output {
                 postProcessingLogger.info("Applied \(remappings.count) word remapping(s)")
+                await tracing.recordEvent(postProcessSpan, "word-remappings-applied", ["count": String(remappings.count)])
               }
               output = remappedResult
             } else {
@@ -116,6 +127,7 @@ struct PostProcessingFeature {
             // Step 2: Apply LLM post-processing if enabled (OpenRouter takes precedence)
             if openRouterEnabled && !openRouterApiKey.isEmpty && !openRouterPrompt.isEmpty && !output.isEmpty {
               postProcessingLogger.info("Sending to OpenRouter for post-processing...")
+              await tracing.recordEvent(postProcessSpan, "llm-start", ["provider": "openrouter", "model": openRouterModel])
               let result = try await openRouterClient.process(
                 output,
                 openRouterPrompt,
@@ -124,10 +136,12 @@ struct PostProcessingFeature {
               )
               if !result.isEmpty {
                 postProcessingLogger.info("OpenRouter post-processing completed")
+                await tracing.recordEvent(postProcessSpan, "llm-complete", ["provider": "openrouter"])
                 output = result
               }
             } else if ollamaEnabled && !ollamaPrompt.isEmpty && !output.isEmpty {
               postProcessingLogger.info("Sending to Ollama for post-processing...")
+              await tracing.recordEvent(postProcessSpan, "llm-start", ["provider": "ollama", "model": ollamaModel])
               let ollamaResult = try await ollamaClient.process(
                 output,
                 ollamaPrompt,
@@ -136,13 +150,19 @@ struct PostProcessingFeature {
               )
               if !ollamaResult.isEmpty {
                 postProcessingLogger.info("Ollama post-processing completed")
+                await tracing.recordEvent(postProcessSpan, "llm-complete", ["provider": "ollama"])
                 output = ollamaResult
               }
             }
             
+            await tracing.setAttribute(postProcessSpan, "hex.output_length", String(output.count))
+            await tracing.endSpan(postProcessSpan, .ok)
+            
             await send(.postProcessingCompleted(output, context))
           } catch {
             postProcessingLogger.error("Post-processing failed: \(error.localizedDescription)")
+            await tracing.recordEvent(postProcessSpan, "error", ["message": error.localizedDescription])
+            await tracing.endSpan(postProcessSpan, .error(error.localizedDescription))
             await send(.postProcessingFailed(error, context))
           }
         }
@@ -152,13 +172,22 @@ struct PostProcessingFeature {
         state.currentContext = nil
         
         guard !processedText.isEmpty else {
-          return .send(.delegate(.didFinishProcessing(processedText, context)))
+          // End pipeline span for empty result
+          return .run { [tracing] send in
+            if let ctx = context.traceContext {
+              let emptySpan = await tracing.startSpan("empty-result", ctx)
+              await tracing.endSpan(emptySpan, .ok)
+              // End the root pipeline span
+              await tracing.endSpanByContext(ctx, .ok)
+            }
+            await send(.delegate(.didFinishProcessing(processedText, context)))
+          }
         }
         
         let transcriptionHistory = state.$transcriptionHistory
         let hexSettings = Shared(.hexSettings)
         
-        return .run { send in
+        return .run { [tracing] send in
           do {
             try await finalizeAndPaste(
               result: processedText,
@@ -166,6 +195,16 @@ struct PostProcessingFeature {
               transcriptionHistory: transcriptionHistory,
               hexSettings: hexSettings
             )
+            
+            // End finalize span and pipeline span on success
+            if let ctx = context.traceContext {
+              let finalizeSpan = await tracing.startSpan("finalize", ctx)
+              await tracing.setAttribute(finalizeSpan, "hex.final_length", String(processedText.count))
+              await tracing.endSpan(finalizeSpan, .ok)
+              // End the root pipeline span
+              await tracing.endSpanByContext(ctx, .ok)
+            }
+            
             await send(.delegate(.didFinishProcessing(processedText, context)))
           } catch {
             await send(.postProcessingFailed(error, context))
@@ -179,7 +218,17 @@ struct PostProcessingFeature {
         // Clean up audio file on failure
         try? FileManager.default.removeItem(at: context.audioURL)
         
-        return .send(.delegate(.didFailProcessing(error, context)))
+        // End pipeline span with error
+        return .run { [tracing] send in
+          if let ctx = context.traceContext {
+            let errorSpan = await tracing.startSpan("pipeline-error", ctx)
+            await tracing.recordEvent(errorSpan, "error", ["message": error.localizedDescription])
+            await tracing.endSpan(errorSpan, .error(error.localizedDescription))
+            // End the root pipeline span with error
+            await tracing.endSpanByContext(ctx, .error(error.localizedDescription))
+          }
+          await send(.delegate(.didFailProcessing(error, context)))
+        }
         
       case .delegate:
         return .none

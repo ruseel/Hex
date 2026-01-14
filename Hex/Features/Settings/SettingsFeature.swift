@@ -92,6 +92,11 @@ struct SettingsFeature {
     case removeWordRemapping(UUID)
     case setRemappingScratchpadFocused(Bool)
 
+    // Post-processing provider toggle (mutual exclusivity)
+    case enableOllama
+    case enableOpenRouter
+    case disablePostProcessing(PostProcessingProvider)
+
     // Post-processing prompt management
     case addOllamaPrompt
     case selectOllamaPrompt(UUID)
@@ -99,6 +104,11 @@ struct SettingsFeature {
     case addOpenRouterPrompt
     case selectOpenRouterPrompt(UUID)
     case deleteOpenRouterPrompt(UUID)
+  }
+
+  enum PostProcessingProvider {
+    case ollama
+    case openRouter
   }
 
   @Dependency(\.keyEventMonitor) var keyEventMonitor
@@ -375,6 +385,31 @@ struct SettingsFeature {
         guard state.hexSettings.hotkey.key == nil else { return .none }
         state.$hexSettings.withLock {
           $0.hotkey.modifiers = $0.hotkey.modifiers.setting(kind: kind, to: side)
+        }
+        return .none
+
+      // MARK: - Provider Toggle (Mutual Exclusivity)
+
+      case .enableOllama:
+        state.$hexSettings.withLock {
+          $0.ollamaPostProcessingEnabled = true
+          $0.openRouterPostProcessingEnabled = false
+        }
+        return .none
+
+      case .enableOpenRouter:
+        state.$hexSettings.withLock {
+          $0.openRouterPostProcessingEnabled = true
+          $0.ollamaPostProcessingEnabled = false
+        }
+        return .none
+
+      case .disablePostProcessing(let provider):
+        state.$hexSettings.withLock {
+          switch provider {
+          case .ollama: $0.ollamaPostProcessingEnabled = false
+          case .openRouter: $0.openRouterPostProcessingEnabled = false
+          }
         }
         return .none
 
